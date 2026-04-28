@@ -1,9 +1,9 @@
 # Crypto Quant Trading System
 
 An automated quantitative trading system for crypto, with execution on
-**Binance Spot** (testnet by default). Built in Python, with a clean
-strategy / risk / execution split, a backtester, and safety rails so you
-can iterate without losing real money.
+**Binance Spot or USDT-M Futures** (testnet by default). Built in Python,
+with a clean strategy / risk / execution split, a backtester, and safety
+rails so you can iterate without losing real money.
 
 > **WARNING — CRYPTO TRADING CARRIES SUBSTANTIAL FINANCIAL RISK.** This
 > code is provided for educational and research purposes. You are solely
@@ -14,20 +14,24 @@ can iterate without losing real money.
 
 ## Features
 
-- **Binance Spot connector** (REST) with testnet support, symbol filters
-  (LOT_SIZE, PRICE_FILTER, MIN_NOTIONAL), and Decimal-safe quantisation.
+- **Binance Spot + USDT-M Futures connectors** (REST) with testnet support,
+  symbol filters (LOT_SIZE, PRICE_FILTER, MIN_NOTIONAL), and Decimal-safe
+  quantisation.
+- **Leverage and shorts** on futures. Per-symbol leverage and margin type
+  (ISOLATED/CROSSED) applied at startup. Both long and short signals
+  supported. `reduce_only` flag is set on stop-loss / take-profit exits.
 - **Strategy framework** with two reference strategies:
   - `ema_crossover` — EMA fast/slow crossover with RSI confirmation.
   - `mean_reversion` — Bollinger-band mean reversion with RSI filter.
 - **Risk manager** — per-trade sizing, max position notional, max total
   exposure, max open positions, daily loss kill-switch, stop-loss /
-  take-profit.
+  take-profit, **hard leverage cap independent of exchange settings**.
 - **Order manager** — market or limit orders, anti-flap throttling,
   dry-run mode that never hits the wire.
 - **Backtester** — bar-by-bar replay with next-open fills (no
   look-ahead), commissions, equity curve, Sharpe / drawdown / win-rate.
 - **CLI**: `quant run`, `quant backtest`, `quant doctor`.
-- **Tests** — indicators, strategies, risk, portfolio, backtester.
+- **Tests** — indicators, strategies, risk, portfolio, backtester, futures.
 
 ## Layout
 
@@ -68,9 +72,16 @@ cp .env.example .env
 # leave BINANCE_TESTNET=true and LIVE_TRADING=false to start
 ```
 
-Get free testnet API keys at <https://testnet.binance.vision/>.
+Pick spot or futures in `config.yaml` under `exchange.market_type`.
+Get free testnet keys for the matching market:
 
-Tweak strategy and risk in `config.yaml`.
+- **Spot testnet**: <https://testnet.binance.vision/>
+- **Futures testnet**: <https://testnet.binancefuture.com/>
+
+> **Spot and futures testnets have separate API keys** — make sure the keys
+> in your `.env` match the `market_type` in `config.yaml`.
+
+Tweak strategy, leverage, and risk in `config.yaml`.
 
 ### 3. Smoke-test connectivity
 
@@ -122,6 +133,75 @@ LIVE_TRADING=true
 `quant run` will require an interactive `y` confirmation, or pass
 `--yes-live` for automation. Start with the smallest possible
 `max_position_notional`.
+
+## Futures trading — small-amount live playbook
+
+Futures multiplies both gains and losses by leverage. The recommended path:
+
+1. **Backtest first.**
+   ```bash
+   quant backtest --symbol BTCUSDT --days 90
+   ```
+   You want a positive total return and a Sharpe > ~1 over a meaningful
+   sample before risking real money.
+
+2. **Soak on futures testnet for at least a few days.** Set
+   `LIVE_TRADING=true` with `BINANCE_TESTNET=true` and futures testnet
+   API keys. Watch for: order rejections from filters, runaway drawdowns,
+   flapping signals.
+
+3. **Conservative live config.** When you flip to real money, suggested
+   starting numbers:
+
+   ```yaml
+   exchange:
+     market_type: futures
+     leverage: 2                       # keep it tiny at first
+     margin_type: ISOLATED             # losses contained per position
+   risk:
+     max_position_notional: 25.0       # margin per trade, in USDT
+     max_total_notional: 50.0
+     max_open_positions: 2
+     risk_per_trade_pct: 0.005         # 0.5% of equity per stop-out
+     daily_loss_limit: 10.0            # hard daily kill switch
+     stop_loss_pct: 0.015
+     take_profit_pct: 0.03
+     max_leverage: 2                   # equal to exchange.leverage
+   ```
+
+   With 2x leverage and `max_position_notional=25`, a position commits
+   ~25 USDT of margin and controls ~50 USDT of notional.
+
+4. **Pre-flight on the live account:**
+   ```bash
+   quant doctor          # confirms futures account, balance > 0
+   ```
+
+5. **Start the bot:**
+   ```bash
+   quant run
+   ```
+   Confirm interactively when warned about real money. Watch the logs
+   for the first few signals and fills before walking away.
+
+### Futures-specific safety notes
+
+- **`risk.max_leverage` is a hard cap** independent of what the exchange
+  allows. If you change `exchange.leverage` above this cap, the runner
+  refuses to start.
+- **`ISOLATED` margin** is recommended over `CROSSED` for systematic
+  strategies — a blowup on one symbol cannot drag the rest of the
+  account into liquidation.
+- **Stop-loss and take-profit exits** are submitted with `reduce_only=true`,
+  so they can never accidentally flip a closed position into the opposite
+  direction.
+- **Funding rates** apply on perpetuals — the system doesn't currently
+  factor funding into PnL. Long-running positions can accrue meaningful
+  funding cost; check the Binance funding history occasionally.
+- **Liquidation risk grows with leverage.** A 2x position with a 50%
+  adverse move is liquidated; a 10x with 10%; a 25x with 4%. Keep
+  leverage low until you're confident the strategy stays out of those
+  moves.
 
 ## Safety model
 

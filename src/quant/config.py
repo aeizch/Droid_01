@@ -13,8 +13,27 @@ from pydantic import BaseModel, Field, field_validator
 
 class ExchangeConfig(BaseModel):
     name: str = "binance"
+    market_type: str = "spot"           # "spot" | "futures"
     quote_asset: str = "USDT"
     recv_window_ms: int = 5000
+    leverage: int = 1                   # futures only
+    margin_type: str = "ISOLATED"       # futures only: ISOLATED | CROSSED
+
+    @field_validator("market_type")
+    @classmethod
+    def _mt(cls, v: str) -> str:
+        v = v.lower()
+        if v not in ("spot", "futures"):
+            raise ValueError("market_type must be 'spot' or 'futures'")
+        return v
+
+    @field_validator("margin_type")
+    @classmethod
+    def _mgn(cls, v: str) -> str:
+        v = v.upper()
+        if v not in ("ISOLATED", "CROSSED"):
+            raise ValueError("margin_type must be 'ISOLATED' or 'CROSSED'")
+        return v
 
 
 class StrategyConfig(BaseModel):
@@ -30,12 +49,20 @@ class RiskConfig(BaseModel):
     daily_loss_limit: float
     stop_loss_pct: float
     take_profit_pct: float
+    max_leverage: int = 1               # hard cap, even if exchange allows more
 
     @field_validator("risk_per_trade_pct")
     @classmethod
     def _frac(cls, v: float) -> float:
         if not 0 < v <= 1:
             raise ValueError("risk_per_trade_pct must be in (0, 1]")
+        return v
+
+    @field_validator("max_leverage")
+    @classmethod
+    def _lev(cls, v: int) -> int:
+        if v < 1 or v > 125:
+            raise ValueError("max_leverage must be in [1, 125]")
         return v
 
 

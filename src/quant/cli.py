@@ -66,8 +66,13 @@ def backtest(ctx: click.Context, symbol: str, days: int, cash: float,
         df = pd.read_csv(csv_path, parse_dates=["open_time"]).set_index("open_time")
     else:
         secrets = load_secrets()
-        from quant.exchange.binance_client import BinanceConnector
-        conn = BinanceConnector(secrets.api_key, secrets.api_secret, testnet=secrets.testnet)
+        from quant.exchange import build_connector
+        conn = build_connector(
+            cfg.exchange.market_type,
+            secrets.api_key,
+            secrets.api_secret,
+            testnet=secrets.testnet,
+        )
         # Approximate: fetch up to ~limit bars. Binance caps at 1000 per call.
         bars_per_day = {
             "1m": 1440, "3m": 480, "5m": 288, "15m": 96, "30m": 48,
@@ -92,15 +97,22 @@ def backtest(ctx: click.Context, symbol: str, days: int, cash: float,
 @click.pass_context
 def doctor(ctx: click.Context) -> None:
     """Check connectivity and credentials."""
+    cfg = ctx.obj["cfg"]
     secrets = load_secrets()
-    from quant.exchange.binance_client import BinanceConnector
-    conn = BinanceConnector(secrets.api_key, secrets.api_secret, testnet=secrets.testnet)
+    from quant.exchange import build_connector
+    conn = build_connector(
+        cfg.exchange.market_type,
+        secrets.api_key,
+        secrets.api_secret,
+        testnet=secrets.testnet,
+    )
+    click.echo(f"Market: {cfg.exchange.market_type}")
     click.echo(f"Testnet: {secrets.testnet}")
     click.echo(f"Ping: {'OK' if conn.ping() else 'FAIL'}")
     click.echo(f"Server time: {conn.server_time()}")
     try:
-        bal = conn.get_free_balance("USDT")
-        click.echo(f"Free USDT: {bal}")
+        bal = conn.get_free_balance(cfg.exchange.quote_asset)
+        click.echo(f"Free {cfg.exchange.quote_asset}: {bal}")
     except Exception as e:
         click.echo(f"Account fetch failed: {e}")
 

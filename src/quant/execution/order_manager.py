@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 
 from quant.config import ExecutionConfig
-from quant.exchange.binance_client import BinanceConnector
+from quant.exchange.base import Exchange
 from quant.portfolio.portfolio import Portfolio
 from quant.strategies.base import Signal, SignalType
 from quant.utils.logging import get_logger
@@ -22,7 +22,7 @@ log = get_logger("execution.order")
 class OrderManager:
     def __init__(
         self,
-        connector: BinanceConnector,
+        connector: Exchange,
         cfg: ExecutionConfig,
         portfolio: Portfolio,
         live_trading: bool,
@@ -31,14 +31,16 @@ class OrderManager:
         self.cfg = cfg
         self.portfolio = portfolio
         self.live_trading = live_trading
+        self.is_futures = getattr(connector, "market_type", "spot") == "futures"
         self._last_order_ts: dict[str, float] = {}
 
     # ---------------------------------------------------------- public
 
-    def submit(self, signal: Signal, qty: float) -> dict | None:
+    def submit(self, signal: Signal, qty: float, reduce_only: bool = False) -> dict | None:
         """Place an order if anti-flap allows. Returns exchange response or None."""
         if not self._allowed_now(signal.symbol):
-            log.info("Skipping %s %s: anti-flap (min_order_spacing_sec)", signal.type, signal.symbol)
+            log.info("Skipping %s %s: anti-flap (min_order_spacing_sec)",
+                     signal.type, signal.symbol)
             return None
 
         side = "BUY" if signal.type == SignalType.BUY else "SELL"
@@ -49,9 +51,19 @@ class OrderManager:
         try:
             if self.cfg.order_type == "limit":
                 px = self._limit_price(signal, side)
-                resp = self.connector.place_limit_order(signal.symbol, side, qty, px)
+                if self.is_futures:
+                    resp = self.connector.place_limit_order(  # type: ignore[call-arg]
+                        signal.symbol, side, qty, px, reduce_only=reduce_only
+                    )
+                else:
+                    resp = self.connector.place_limit_order(signal.symbol, side, qty, px)
             else:
-                resp = self.connector.place_market_order(signal.symbol, side, qty)
+                if self.is_futures:
+                    resp = self.connector.place_market_order(  # type: ignore[call-arg]
+                        signal.symbol, side, qty, reduce_only=reduce_only
+                    )
+                else:
+                    resp = self.connector.place_market_order(signal.symbol, side, qty)
         except Exception as e:
             log.exception("Order submit failed: %s", e)
             return None

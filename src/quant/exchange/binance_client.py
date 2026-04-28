@@ -7,42 +7,16 @@ then converts to float for the rest of the system.
 from __future__ import annotations
 
 import math
-import time
-from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 import pandas as pd
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
+from quant.exchange.base import SymbolFilters
 from quant.utils.logging import get_logger
 
 log = get_logger("exchange.binance")
-
-
-@dataclass
-class SymbolFilters:
-    symbol: str
-    base_asset: str
-    quote_asset: str
-    step_size: float       # LOT_SIZE
-    tick_size: float       # PRICE_FILTER
-    min_qty: float
-    min_notional: float
-
-    def quantize_qty(self, qty: float) -> float:
-        if self.step_size <= 0:
-            return qty
-        d_qty = Decimal(str(qty))
-        d_step = Decimal(str(self.step_size))
-        return float((d_qty // d_step) * d_step)
-
-    def quantize_price(self, price: float) -> float:
-        if self.tick_size <= 0:
-            return price
-        d_price = Decimal(str(price)).quantize(Decimal(str(self.tick_size)), rounding=ROUND_DOWN)
-        return float(d_price)
 
 
 class BinanceConnector:
@@ -60,6 +34,8 @@ class BinanceConnector:
         "1d": Client.KLINE_INTERVAL_1DAY,
     }
 
+    market_type = "spot"
+
     def __init__(
         self,
         api_key: str,
@@ -73,7 +49,7 @@ class BinanceConnector:
         if testnet:
             self.client.API_URL = "https://testnet.binance.vision/api"
         self._filters_cache: dict[str, SymbolFilters] = {}
-        log.info("Binance connector ready (testnet=%s)", testnet)
+        log.info("Binance Spot connector ready (testnet=%s)", testnet)
 
     # ------------------------------------------------------------------ market data
 

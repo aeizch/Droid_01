@@ -30,6 +30,7 @@ class Position:
 @dataclass
 class Portfolio:
     quote_asset: str = "USDT"
+    allow_short: bool = False
     positions: dict[str, Position] = field(default_factory=dict)
     realised_pnl: float = 0.0
     daily_pnl: float = 0.0
@@ -47,14 +48,15 @@ class Portfolio:
         signed_qty = qty if side == "BUY" else -qty
         pos = self.positions.get(symbol)
         if pos is None:
-            if side == "BUY":
-                self.positions[symbol] = Position(
-                    symbol=symbol,
-                    qty=signed_qty,
-                    avg_price=price,
-                    opened_at=datetime.now(timezone.utc),
-                )
-            # SELL with no position is a no-op locally (spot can't go short).
+            if side == "SELL" and not self.allow_short:
+                # Spot can't short; ignore stray sells.
+                return
+            self.positions[symbol] = Position(
+                symbol=symbol,
+                qty=signed_qty,
+                avg_price=price,
+                opened_at=datetime.now(timezone.utc),
+            )
             return
 
         new_qty = pos.qty + signed_qty
@@ -65,13 +67,18 @@ class Portfolio:
             pos.avg_price = total_cost / new_qty if new_qty != 0 else 0.0
             return
 
-        # Position decrease/close (opposite direction).
+        # Position decrease / close / flip (opposite direction).
         closed_qty = min(abs(signed_qty), abs(pos.qty))
         pnl = (price - pos.avg_price) * (closed_qty if pos.qty > 0 else -closed_qty)
         self.realised_pnl += pnl
         self.daily_pnl += pnl
         if abs(new_qty) < 1e-12:
             self.positions.pop(symbol, None)
+        elif (pos.qty > 0) != (new_qty > 0) and self.allow_short:
+            # Position flipped: residual qty opens a fresh leg at the fill price.
+            pos.qty = new_qty
+            pos.avg_price = price
+            pos.opened_at = datetime.now(timezone.utc)
         else:
             pos.qty = new_qty
 

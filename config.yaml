@@ -4,8 +4,15 @@
 
 exchange:
   name: binance
+  # "spot" or "futures" (USDT-M perpetuals).
+  market_type: futures
   quote_asset: USDT
   recv_window_ms: 5000
+  # Futures-only. Per-symbol leverage applied at startup. Must be <= risk.max_leverage.
+  leverage: 3
+  # Futures-only. ISOLATED is safer than CROSSED for systematic strategies
+  # because losses can't cascade across positions.
+  margin_type: ISOLATED
 
 # Universe of symbols to trade.
 universe:
@@ -20,7 +27,6 @@ interval: 15m
 warmup_bars: 300
 
 # How often the live runner re-evaluates strategies (seconds).
-# For interval=15m, 30s polling is plenty.
 poll_interval_sec: 30
 
 strategy:
@@ -28,26 +34,29 @@ strategy:
   params:
     fast: 12
     slow: 26
-    # Optional confirmation filter using RSI to avoid chasing.
     rsi_period: 14
-    rsi_buy_max: 70   # don't buy if RSI > this
-    rsi_sell_min: 30  # don't sell if RSI < this
+    rsi_buy_max: 70
+    rsi_sell_min: 30
 
 # Risk management — hard limits enforced before every order.
+# Notional caps below are MARGIN caps; effective exposure cap = cap * leverage.
 risk:
-  # Maximum notional (in quote asset, e.g. USDT) per single position.
-  max_position_notional: 200.0
-  # Maximum total notional exposure across all open positions.
-  max_total_notional: 1000.0
-  # Maximum number of open positions at once.
-  max_open_positions: 3
-  # Fraction of free balance to risk per trade (used for sizing).
-  risk_per_trade_pct: 0.01
-  # Stop trading for the day if realised PnL drops below -X (quote asset).
-  daily_loss_limit: 50.0
+  # Max margin (in quote asset) committed to a single position.
+  max_position_notional: 50.0
+  # Max total margin across all open positions.
+  max_total_notional: 150.0
+  # Maximum number of concurrent positions.
+  max_open_positions: 2
+  # Fraction of free balance willing to lose on a single stop-out.
+  risk_per_trade_pct: 0.005
+  # Halt trading for the day if realised PnL drops below -X (quote asset).
+  daily_loss_limit: 25.0
   # Per-trade stop loss / take profit as fraction of entry price.
-  stop_loss_pct: 0.02
-  take_profit_pct: 0.04
+  stop_loss_pct: 0.015
+  take_profit_pct: 0.03
+  # HARD CAP on leverage applied. Even if exchange allows 125x, this gates it.
+  # Start tiny on live: 2-3x is plenty until you know the strategy is profitable.
+  max_leverage: 3
 
 execution:
   # market | limit
