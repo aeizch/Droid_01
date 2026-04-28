@@ -70,6 +70,10 @@ class ExecutionConfig(BaseModel):
     order_type: str = "market"
     limit_offset_bps: int = 5
     min_order_spacing_sec: int = 60
+    # Extra cushion above the exchange's MIN_NOTIONAL filter, as a fraction.
+    # 0.10 = require target notional to be at least 110% of the exchange minimum,
+    # so step-size quantisation can't push us under the line.
+    min_notional_buffer_pct: float = 0.10
 
 
 class LoggingConfig(BaseModel):

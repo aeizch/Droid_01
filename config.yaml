@@ -1,32 +1,26 @@
 # ----------------------------------------------------------------------------
 # Crypto Quant Trading System — main configuration
+#
+# This file is tuned for a TINY account (~$30 USDT) on Binance USDT-M Futures
+# with 2x leverage. See "Tiny-account playbook" in README.md for the math.
 # ----------------------------------------------------------------------------
 
 exchange:
   name: binance
-  # "spot" or "futures" (USDT-M perpetuals).
-  market_type: futures
+  market_type: futures        # "spot" or "futures"
   quote_asset: USDT
   recv_window_ms: 5000
-  # Futures-only. Per-symbol leverage applied at startup. Must be <= risk.max_leverage.
-  leverage: 3
-  # Futures-only. ISOLATED is safer than CROSSED for systematic strategies
-  # because losses can't cascade across positions.
-  margin_type: ISOLATED
+  leverage: 2                 # MUST be <= risk.max_leverage
+  margin_type: ISOLATED       # ISOLATED contains losses to a single position
 
-# Universe of symbols to trade.
+# Universe of symbols.
+# With < $50 of equity, restrict to a single liquid pair to avoid splitting
+# the tiny budget across multiple sub-min-notional positions.
 universe:
   - BTCUSDT
-  - ETHUSDT
-  - SOLUSDT
 
-# Bar interval for the strategy. One of: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 1d
 interval: 15m
-
-# How many historical bars to keep in memory per symbol for indicators.
 warmup_bars: 300
-
-# How often the live runner re-evaluates strategies (seconds).
 poll_interval_sec: 30
 
 strategy:
@@ -38,33 +32,34 @@ strategy:
     rsi_buy_max: 70
     rsi_sell_min: 30
 
-# Risk management — hard limits enforced before every order.
+# Risk management.
 # Notional caps below are MARGIN caps; effective exposure cap = cap * leverage.
+#
+# Sizing math (current values, $30 balance, 2x leverage):
+#   notional_by_risk = balance * risk_per_trade_pct / stop_loss_pct
+#                    = 30 * 0.02 / 0.02 = $30 notional ($15 margin at 2x)
+#   max_notional     = max_position_notional * leverage
+#                    = 14 * 2 = $28 notional ($14 margin)
+#   final notional   = min(notional_by_risk, max_notional) = $28
+# That sits comfortably above Binance's ~$20 USDT-M min notional, with a
+# 10% buffer on top via execution.min_notional_buffer_pct.
 risk:
-  # Max margin (in quote asset) committed to a single position.
-  max_position_notional: 50.0
-  # Max total margin across all open positions.
-  max_total_notional: 150.0
-  # Maximum number of concurrent positions.
-  max_open_positions: 2
-  # Fraction of free balance willing to lose on a single stop-out.
-  risk_per_trade_pct: 0.005
-  # Halt trading for the day if realised PnL drops below -X (quote asset).
-  daily_loss_limit: 25.0
-  # Per-trade stop loss / take profit as fraction of entry price.
-  stop_loss_pct: 0.015
-  take_profit_pct: 0.03
-  # HARD CAP on leverage applied. Even if exchange allows 125x, this gates it.
-  # Start tiny on live: 2-3x is plenty until you know the strategy is profitable.
-  max_leverage: 3
+  max_position_notional: 14.0   # margin per position, in USDT
+  max_total_notional: 14.0      # only one position at a time on $30 balance
+  max_open_positions: 1
+  risk_per_trade_pct: 0.02      # 2% of equity per stop-out (~$0.60 on $30)
+  daily_loss_limit: 5.0         # hard kill switch — ~17% of $30 in one day
+  stop_loss_pct: 0.02
+  take_profit_pct: 0.04
+  max_leverage: 2
 
 execution:
-  # market | limit
   order_type: market
-  # For limit orders, offset from last price (positive = more aggressive).
   limit_offset_bps: 5
-  # Minimum seconds between orders on the same symbol (anti-flap).
   min_order_spacing_sec: 60
+  # Require target notional to be >= MIN_NOTIONAL * (1 + this).
+  # Cushion against step-size quantisation pushing us below the minimum.
+  min_notional_buffer_pct: 0.10
 
 logging:
   level: INFO

@@ -45,6 +45,11 @@ class OrderManager:
 
         side = "BUY" if signal.type == SignalType.BUY else "SELL"
 
+        # Reject below MIN_NOTIONAL early: dry-run gets a clear warning;
+        # live avoids a guaranteed exchange rejection.
+        if not reduce_only and not self._check_min_notional(signal, qty):
+            return None
+
         if not self.live_trading:
             return self._simulate(signal, qty, side)
 
@@ -114,6 +119,41 @@ class OrderManager:
         if last is None:
             return True
         return (time.time() - last) >= self.cfg.min_order_spacing_sec
+
+    def _check_min_notional(self, signal: Signal, qty: float) -> bool:
+        """Reject orders whose notional would fall below the exchange minimum.
+
+        Quantises qty against the symbol's step_size so the check matches what
+        actually goes on the wire. Skips silently if filters can't be fetched.
+        """
+        try:
+            sf = self.connector.get_symbol_filters(signal.symbol)
+        except Exception as e:
+            log.warning("Could not fetch filters for %s, skipping min-notional check: %s",
+                        signal.symbol, e)
+            return True
+
+        qty_q = sf.quantize_qty(qty)
+        notional = qty_q * signal.price
+        threshold = sf.min_notional * (1.0 + self.cfg.min_notional_buffer_pct)
+
+        if qty_q < sf.min_qty or qty_q <= 0:
+            log.warning(
+                "Reject %s %s: qty %.8f below min_qty %.8f (orig %.8f)",
+                signal.type.value, signal.symbol, qty_q, sf.min_qty, qty,
+            )
+            return False
+
+        if sf.min_notional > 0 and notional < threshold:
+            log.warning(
+                "Reject %s %s: notional %.4f below min %.4f (+%.0f%% buffer = %.4f). "
+                "Increase max_position_notional, leverage, or risk_per_trade_pct.",
+                signal.type.value, signal.symbol, notional, sf.min_notional,
+                self.cfg.min_notional_buffer_pct * 100, threshold,
+            )
+            return False
+
+        return True
 
     def _limit_price(self, signal: Signal, side: str) -> float:
         bps = self.cfg.limit_offset_bps / 10_000.0
