@@ -1,7 +1,8 @@
 """Pre-trade risk checks and position sizing.
 
-Works for both spot and futures. For futures, set `allow_short=True` and
-`leverage` so sizing accounts for margin instead of full notional.
+All caps are computed dynamically from the starting balance the runner
+snapshots from Binance at session start (and at each UTC day roll). There
+are no hard-coded dollar limits — top up the account and they scale.
 """
 
 from __future__ import annotations
@@ -38,21 +39,44 @@ class RiskManager:
                 f"leverage={self.leverage} exceeds max_leverage={self.cfg.max_leverage}"
             )
         self.kill_switch = False
+        # Snapshot of available balance at session start / day roll. Set by the
+        # runner before the first tick. Cap calculations rely on it.
+        self.starting_balance: float = 0.0
+
+    # -------------------------------------------------------- balance snapshot
+
+    def set_starting_balance(self, amount: float) -> None:
+        if amount < 0:
+            raise ValueError("starting balance cannot be negative")
+        self.starting_balance = float(amount)
+        # Re-arm the kill switch on day roll.
+        self.kill_switch = False
+        log.info("Risk starting balance snapshot: %.4f", self.starting_balance)
+
+    # -------------------------------------------------------- derived caps
+
+    def _max_position_notional(self) -> float:
+        return self.starting_balance * self.cfg.max_position_pct * self.leverage
+
+    def _max_total_notional(self) -> float:
+        return self.starting_balance * self.cfg.max_total_pct * self.leverage
+
+    def _daily_loss_threshold(self) -> float:
+        return self.starting_balance * self.cfg.daily_loss_pct
 
     # -------------------------------------------------------- sizing
 
-    def size_position(self, signal: Signal, free_quote_balance: float) -> float:
-        """Size a position so that a stop-out costs at most risk_per_trade_pct of free balance.
-
-        For futures, leverage multiplies notional for the same margin, so we
-        scale the cap by leverage.
+    def size_position(self, signal: Signal, free_balance: float) -> float:
+        """Size a position using the smaller of:
+          (a) risk-budget sizing: lose at most risk_per_trade_pct of *current*
+              free balance on a stop-out, and
+          (b) the per-position margin cap derived from starting balance.
         """
-        risk_capital = free_quote_balance * self.cfg.risk_per_trade_pct
-        notional_by_risk = risk_capital / max(self.cfg.stop_loss_pct, 1e-6)
-        max_notional = self.cfg.max_position_notional * self.leverage
-        notional = min(notional_by_risk, max_notional)
-        if signal.price <= 0:
+        if signal.price <= 0 or self.starting_balance <= 0:
             return 0.0
+        risk_capital = max(free_balance, 0.0) * self.cfg.risk_per_trade_pct
+        notional_by_risk = risk_capital / max(self.cfg.stop_loss_pct, 1e-6)
+        notional = min(notional_by_risk, self._max_position_notional())
         return notional / signal.price
 
     # -------------------------------------------------------- gating
@@ -70,18 +94,25 @@ class RiskManager:
         if signal.type == SignalType.HOLD:
             return RiskDecision(False, 0.0, "hold signal")
 
-        if portfolio.daily_pnl <= -abs(self.cfg.daily_loss_limit):
+        if self.starting_balance <= 0:
+            return RiskDecision(False, 0.0, "starting balance not set / zero")
+
+        loss_threshold = self._daily_loss_threshold()
+        if portfolio.daily_pnl <= -loss_threshold:
             self.kill_switch = True
-            log.warning("Daily loss limit hit (%.2f) — kill switch engaged", portfolio.daily_pnl)
+            log.warning(
+                "Daily loss limit hit (pnl=%.2f, threshold=-%.2f) — kill switch engaged",
+                portfolio.daily_pnl, loss_threshold,
+            )
             return RiskDecision(False, 0.0, "daily loss limit hit")
 
         notional = qty * signal.price
         if notional <= 0:
             return RiskDecision(False, 0.0, "zero notional")
 
-        max_notional = self.cfg.max_position_notional * self.leverage
-        if notional > max_notional + 1e-6:
-            return RiskDecision(False, 0.0, f"notional {notional:.2f} > max {max_notional:.2f}")
+        cap_pos = self._max_position_notional()
+        if notional > cap_pos + 1e-6:
+            return RiskDecision(False, 0.0, f"notional {notional:.2f} > max {cap_pos:.2f}")
 
         # On spot, SELL is only allowed to close a long.
         if signal.type == SignalType.SELL and not self.allow_short:
@@ -100,7 +131,7 @@ class RiskManager:
         if existing is None:
             if portfolio.open_count() >= self.cfg.max_open_positions:
                 return RiskDecision(False, 0.0, "max_open_positions reached")
-            cap_total = self.cfg.max_total_notional * self.leverage
+            cap_total = self._max_total_notional()
             projected = portfolio.total_notional(marks) + notional
             if projected > cap_total + 1e-6:
                 return RiskDecision(

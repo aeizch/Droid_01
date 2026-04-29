@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import signal as os_signal
 import time
+from datetime import datetime, timezone
 
 from binance.exceptions import BinanceAPIException
 
@@ -65,6 +66,9 @@ class LiveRunner:
         if self.is_futures and secrets.live_trading:
             self._configure_futures()
 
+        # Day stamp tracked so we can re-snapshot starting balance on day roll.
+        self._snapshot_day: str | None = None
+
         os_signal.signal(os_signal.SIGINT, self._handle_signal)
         os_signal.signal(os_signal.SIGTERM, self._handle_signal)
 
@@ -102,8 +106,12 @@ class LiveRunner:
         )
         self.data.warmup(self.cfg.universe)
 
+        # Initial balance snapshot — drives every notional cap and the daily kill switch.
+        self._refresh_starting_balance()
+
         while not self._stop:
             try:
+                self._maybe_roll_day()
                 self._tick()
             except Exception as e:
                 log.exception("Tick failed: %s", e)
@@ -113,6 +121,35 @@ class LiveRunner:
             "Stopped. Realised PnL: %.4f %s",
             self.portfolio.realised_pnl, self.portfolio.quote_asset,
         )
+
+    # ---------------------------------------------------------- balance / day
+
+    def _current_balance(self) -> float:
+        """Live: pulled from Binance availableBalance. Dry-run: virtual."""
+        if self.secrets.live_trading:
+            return self.connector.get_free_balance(self.cfg.exchange.quote_asset)
+        return 10_000.0
+
+    def _refresh_starting_balance(self) -> None:
+        bal = self._current_balance()
+        self.risk.set_starting_balance(bal)
+        self._snapshot_day = datetime.now(timezone.utc).date().isoformat()
+        log.info(
+            "Starting balance for session/day: %.4f %s | "
+            "max_position=%.4f | max_total=%.4f | daily_loss_threshold=-%.4f",
+            bal, self.cfg.exchange.quote_asset,
+            self.risk._max_position_notional(),
+            self.risk._max_total_notional(),
+            self.risk._daily_loss_threshold(),
+        )
+
+    def _maybe_roll_day(self) -> None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if self._snapshot_day != today:
+            log.info("UTC day rolled (%s -> %s) — refreshing starting balance",
+                     self._snapshot_day, today)
+            self.portfolio.roll_day()
+            self._refresh_starting_balance()
 
     def _tick(self) -> None:
         marks: dict[str, float] = {}
@@ -124,11 +161,7 @@ class LiveRunner:
             signals.append(sig)
             log.debug("Signal %s: %s @ %.4f (%s)", sym, sig.type.value, sig.price, sig.reason)
 
-        free_quote = (
-            self.connector.get_free_balance(self.cfg.exchange.quote_asset)
-            if self.secrets.live_trading
-            else 10_000.0  # virtual cash for dry-run
-        )
+        free_quote = self._current_balance()
 
         for sig in signals:
             if sig.type == SignalType.HOLD:

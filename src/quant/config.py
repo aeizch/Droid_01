@@ -42,20 +42,26 @@ class StrategyConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    max_position_notional: float
-    max_total_notional: float
+    # Margin caps as fractions of session starting balance (queried from Binance).
+    # max_position_pct=0.5 means a single position can use up to 50% of starting
+    # balance as margin; effective notional cap = pct * starting_balance * leverage.
+    max_position_pct: float
+    max_total_pct: float
     max_open_positions: int
     risk_per_trade_pct: float
-    daily_loss_limit: float
+    # Daily kill switch: stop trading if realised PnL drops below
+    # -daily_loss_pct * starting_balance (snapshotted each day).
+    daily_loss_pct: float
     stop_loss_pct: float
     take_profit_pct: float
     max_leverage: int = 1               # hard cap, even if exchange allows more
 
-    @field_validator("risk_per_trade_pct")
+    @field_validator("risk_per_trade_pct", "max_position_pct", "max_total_pct",
+                     "daily_loss_pct", "stop_loss_pct", "take_profit_pct")
     @classmethod
     def _frac(cls, v: float) -> float:
-        if not 0 < v <= 1:
-            raise ValueError("risk_per_trade_pct must be in (0, 1]")
+        if not 0 < v <= 10:  # allow >1 for stretchy take_profit; sanity ceiling
+            raise ValueError("fraction must be > 0")
         return v
 
     @field_validator("max_leverage")

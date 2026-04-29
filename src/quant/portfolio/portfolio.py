@@ -36,14 +36,20 @@ class Portfolio:
     daily_pnl: float = 0.0
     _day: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
 
-    def _roll_day(self) -> None:
+    def roll_day(self) -> bool:
+        """Reset daily PnL if the UTC date has changed. Returns True on roll."""
         today = datetime.now(timezone.utc).date().isoformat()
         if today != self._day:
             self._day = today
             self.daily_pnl = 0.0
+            return True
+        return False
+
+    # Back-compat alias used internally.
+    _roll_day = roll_day
 
     def on_fill(self, symbol: str, side: str, qty: float, price: float) -> None:
-        self._roll_day()
+        self.roll_day()
         side = side.upper()
         signed_qty = qty if side == "BUY" else -qty
         pos = self.positions.get(symbol)

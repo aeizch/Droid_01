@@ -23,9 +23,11 @@ rails so you can iterate without losing real money.
 - **Strategy framework** with two reference strategies:
   - `ema_crossover` — EMA fast/slow crossover with RSI confirmation.
   - `mean_reversion` — Bollinger-band mean reversion with RSI filter.
-- **Risk manager** — per-trade sizing, max position notional, max total
-  exposure, max open positions, daily loss kill-switch, stop-loss /
-  take-profit, **hard leverage cap independent of exchange settings**.
+- **Risk manager** — **all caps are percentages of the live Binance
+  balance** snapshotted at session start and refreshed on each UTC day
+  roll. Per-trade sizing, max position / total notional, max open
+  positions, daily loss kill-switch, stop-loss / take-profit, hard
+  leverage cap independent of exchange settings.
 - **Order manager** — market or limit orders, anti-flap throttling,
   dry-run mode that never hits the wire.
 - **Backtester** — bar-by-bar replay with next-open fills (no
@@ -150,87 +152,95 @@ Futures multiplies both gains and losses by leverage. The recommended path:
    API keys. Watch for: order rejections from filters, runaway drawdowns,
    flapping signals.
 
-3. **Conservative live config.** The shipped `config.yaml` is already
-   tuned for a $30 USDT account on USDT-M futures at 2x leverage:
+3. **Conservative live config.** The shipped `config.yaml` uses
+   percentage-based caps so it works on any account size:
 
    ```yaml
    exchange:
      market_type: futures
      leverage: 2
      margin_type: ISOLATED
-   universe: [BTCUSDT]                # one symbol on a tiny budget
+   universe: [BTCUSDT]
    risk:
-     max_position_notional: 14.0      # $14 margin -> $28 notional at 2x
-     max_total_notional: 14.0         # one position at a time
+     max_position_pct: 0.50      # one position uses up to 50% of starting balance
+     max_total_pct: 0.90         # total margin across positions ≤ 90%
      max_open_positions: 1
-     risk_per_trade_pct: 0.02         # 2% of equity per stop-out
-     daily_loss_limit: 5.0            # ~17% of $30 — hard kill switch
+     risk_per_trade_pct: 0.02    # 2% of free balance per stop-out
+     daily_loss_pct: 0.15        # halt for the day at -15% of starting balance
      stop_loss_pct: 0.02
      take_profit_pct: 0.04
      max_leverage: 2
    ```
 
-## Tiny-account playbook ($10–$50 balance)
+## Dynamic sizing from Binance balance
 
-Binance USDT-M futures has a per-order **minimum notional of about $20**.
-With leverage `L`, that means each position needs at least `$20 / L` of
-margin. The system computes target notional as:
+Capital is **not configured as a fixed dollar amount**. At session start
+the runner queries `availableBalance` from your futures account and
+snapshots it as the basis for every notional cap and the daily kill
+switch. The snapshot is refreshed automatically at each UTC day roll.
 
 ```
-notional_by_risk = balance × risk_per_trade_pct / stop_loss_pct
-max_notional     = max_position_notional × leverage
-target_notional  = min(notional_by_risk, max_notional)
+At startup / day roll: starting_balance = exchange.availableBalance(USDT)
+
+For each signal:
+  risk_capital     = current_free_balance × risk_per_trade_pct
+  notional_by_risk = risk_capital / stop_loss_pct
+  max_notional     = starting_balance × max_position_pct × leverage
+  target_notional  = min(notional_by_risk, max_notional)
+
+Pre-flight:  target_notional ≥ MIN_NOTIONAL × (1 + min_notional_buffer_pct)
 ```
 
-For an order to fly, **`target_notional × (1 + min_notional_buffer_pct)`
-must clear the exchange minimum**. The order manager rejects below-min
-orders pre-flight (you'll see `Reject ... below min` in the log) so they
-never get bounced by the exchange.
+If you top up the account, **stop and restart** the bot — the new
+balance will be picked up on the next snapshot. (Alternatively, leave it
+running over the UTC midnight rollover and it will re-snapshot itself.)
 
-### Worked example: $30 balance, 2x leverage
+### How caps scale with balance (default config, 2x leverage)
 
-| Setting                         | Value     |
-| ------------------------------- | --------- |
-| `balance` (free USDT)           | 30.00     |
-| `leverage`                      | 2         |
-| `risk_per_trade_pct`            | 0.02      |
-| `stop_loss_pct`                 | 0.02      |
-| `max_position_notional` (margin)| 14.00     |
-| `min_notional_buffer_pct`       | 0.10      |
+| Starting balance | Max per-position notional | Max total notional | Daily kill switch |
+| ----------------:| -------------------------:| ------------------:| -----------------:|
+| $10              | $10                       | $18                | -$1.50            |
+| $30              | $30                       | $54                | -$4.50            |
+| $60              | $60                       | $108               | -$9.00            |
+| $100             | $100                      | $180               | -$15.00           |
+| $250             | $250                      | $450               | -$37.50           |
 
-- `notional_by_risk = 30 × 0.02 / 0.02 = $30` notional.
-- `max_notional     = 14 × 2          = $28` notional.
-- `target_notional  = min($30, $28)   = $28` notional.
-- Min-notional check: `$28 ≥ $20 × 1.10 = $22` ✅
-- Margin used: `$28 / 2 = $14` of `$30` (~47%) — leaves room for adverse moves.
-- A stop-out costs: `$28 × 0.02 = $0.56` per trade.
-- Daily kill switch trips at `-$5` (~9 stops or one nasty 17% adverse move).
+> Binance USDT-M futures has a **min notional of ~$20 per order**. With
+> `max_position_pct: 0.50` and 2x leverage, you need about **$22 of
+> available balance** for the bot to actually place trades — anything
+> smaller will be rejected by the pre-flight check with a clear log line:
+> `Reject BUY BTCUSDT: notional X below min 20 (+10% buffer = 22)`. Top
+> up, restart, or raise `max_position_pct` / `leverage` to clear it.
 
-### Worked example: $10 balance
+### What if I only have $10?
 
-This is at the practical floor and is **not recommended** for live money.
-You can only run one position with effectively all of your equity tied up
-as margin, leaving zero buffer. The math:
+You're at the practical floor. With the default settings the bot won't
+trade ($10 balance × 0.5 × 2x = $10 notional, below the $22 buffered
+minimum). Two options:
 
-- To clear $20 min notional at 2x, you need $10 of margin — your entire
-  balance. Any unrealised loss eats into that margin and risks immediate
-  liquidation.
-- If you must, set `max_position_notional: 10`, `max_total_notional: 10`,
-  `max_open_positions: 1`, `risk_per_trade_pct: 0.05`, and accept that
-  one position pinning all your margin is the design. Strongly consider
-  3x leverage instead so margin is `$20 / 3 ≈ $6.67` of `$10`, leaving
-  ~33% buffer — but every leverage step compounds liquidation risk.
+1. **Bump `max_position_pct` to 1.10** (use up to 110% — i.e. all
+   available balance plus a bit of leverage headroom). At $10 × 1.10 ×
+   2x = $22 notional. Margin used = $11, larger than the $10 starting
+   balance because it now uses leverage's borrowing room. Liquidation
+   distance shrinks substantially — only safe with very tight stops.
+2. **Bump leverage to 3x** (with `max_leverage: 3` to match). At $10 ×
+   0.50 × 3 = $15 notional, still below the buffered minimum. Combine
+   with `max_position_pct: 0.75` → $22.50 notional. Liquidation
+   distance ~30% adverse move.
+
+Either way, $10 leaves zero margin buffer for unrealised losses. **$30+
+is the sane starting point.**
 
 ### Things that go wrong on tiny accounts
 
-- **Sub-min-notional rejections** — fixed by the pre-flight check, but
-  the log will keep saying `Reject` until sizing produces ≥$22 notional.
-  Bump `risk_per_trade_pct`, `max_position_notional`, or `leverage`.
+- **Sub-min-notional rejections** — pre-flight catches these, but the
+  log will keep saying `Reject` until balance × `max_position_pct` ×
+  leverage clears the buffered minimum.
 - **Liquidation from a single 8% move** at 10x leverage. Keep leverage
-  at 2x or 3x while the strategy is unproven.
-- **Funding rates** on perpetuals bite harder when balance is small.
-  At -0.01% funding 3×/day on a $28 notional, that's `$0.0084/day` — not
-  much, but it adds up if a position lingers.
+  at 2x–3x until the strategy is proven.
+- **Funding rates** on perpetuals are not modelled in PnL. At -0.01%
+  funding 3×/day on a $30 notional, that's ~$0.009/day — small, but it
+  accumulates on lingering positions.
 
 4. **Pre-flight on the live account:**
    ```bash
